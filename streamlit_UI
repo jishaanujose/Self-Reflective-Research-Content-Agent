@@ -1,0 +1,313 @@
+import os
+import streamlit as st
+import json
+from langchain_groq import ChatGroq
+from langchain_community.tools import DuckDuckGoSearchRun
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
+from typing import TypedDict, List
+from typing_extensions import Annotated  # Add this import
+import operator  # Add this import
+
+st.set_page_config(page_title="AI Article Researcher", page_icon="📝", layout="wide")
+
+# Secure API Key Entry
+if "GROQ_API_KEY" not in os.environ:
+    os.environ["GROQ_API_KEY"] = "API KEY"
+llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
+web_search_tool = DuckDuckGoSearchRun()
+
+class AgentState(TypedDict):
+    user_topic: str
+    query_list: List[str]
+    raw_info: List[str]
+    evaluator_resp: dict
+    final_resp: dict
+    logs: Annotated[List[str], operator.add]  # Changed this line
+    regen_count: int
+
+def query_generator(state: AgentState) -> dict:
+    new_logs = []  # Changed
+    new_logs.append("Query generator Agent Initialised... \n")  # Changed from logs.append
+    prompt = f'''You are a helpful assistant to create atmost three different queries for searching in web to get most relevant
+  information on the topic given by the user.
+  ----------------------------
+  User topic: {state['user_topic']}
+  ---------------------------
+  Give the response in the given json format and donot add any additional data like markdown formatting syntax block wrappers, explanations, or intro text
+  ------------------------
+  [{{"query":"query for search"}},
+  {{"query":"query for search"}}]
+
+  '''
+    # new_logs.append(f"🧠 [Node: AI LLM response]: '{prompt}'... \n")
+    response = llm.invoke(prompt)
+    formated_response = {}
+    try:
+        clean_content = response.content.strip().replace("```json", "").replace("```", "").strip()
+        formated_response = json.loads(clean_content)
+        new_logs.append("Query generation completed..")  # Changed from logs.append
+    except Exception as e:
+        new_logs.append(f"⚠️ Model extraction or link lookup exception: {str(e)} \n")  # Changed from logs.append
+
+    return {'query_list': formated_response, 'logs': new_logs}  # Changed to new_logs
+
+
+def searcher(state: AgentState) -> dict:
+    new_logs = []  # Changed
+    new_logs.append("Searcher Agent Initialised... \n")  # Changed
+    response = []
+    for query in state['query_list']:
+        new_logs.append(
+            f"🌐 [Node: Web Search] Querying DuckDuckGo: '{query['query']}'...")  # Changed (fixed query['query'])
+        # Execute the live web search tool
+        search_results_text = web_search_tool.invoke(query['query'])
+        response.append(search_results_text)
+    # new_logs.append(f"🌐 [Node: {response}")
+    return {'raw_info': response, 'logs': new_logs}  # Changed
+
+
+def data_evaluator(state: AgentState) -> dict:
+    new_logs = []  # Changed
+    new_logs.append("Data Evaluator Agent Initialised... \n")  # Changed
+    prompt = f'''
+  You are a helpful assistant who help to evaluate the content retrieved from web for the topic {state['user_topic']} as:
+  1. Relevant to the topic
+  2. Not an outlier
+  3. If all aspects are covered so as to write an article on the topic.
+
+  The data obtained from the web is given below:
+  {state['raw_info']} \n
+  \n
+  If you feels the contents are enough for creating a well structured article, just return a json response as given below
+   {{"Relevance":"Yes"}} other wise return {{ "Relevance":"No"}}. \n
+   Do not add any additional text, explanation or evaluations, Just return the json.
+  '''
+    response = llm.invoke(prompt)
+
+    cleaned_response = {}
+    try:
+        clean_content = response.content.strip().replace("```json", "").replace("```", "").strip()
+        cleaned_response = json.loads(clean_content)
+        new_logs.append("Evaluation completed..")  # Changed
+    except Exception as e:
+        new_logs.append(f"⚠️ Model extraction or link lookup exception: {str(e)} \n")  # Changed
+
+    return {'evaluator_resp': cleaned_response, 'logs': new_logs}  # Changed
+
+
+def analyse_evaluator(state: AgentState) -> str:
+    # logs=list(state['logs'])
+    # logs.append("Evaluator response checking Agent Initialised... \n")
+    eval_resp = state['evaluator_resp']
+    if eval_resp['Relevance'] == 'Yes':
+        return "success"
+    else:
+        return "requery"
+
+
+def count_checker_initialise(state: AgentState) -> dict:
+    new_logs = []  # Changed
+    new_logs.append("Count Checker initialiser Agent started... \n")  # Changed
+    return {'logs': new_logs}  # Changed
+
+
+def count_check(state: AgentState) -> dict:
+    if state['regen_count'] < 2:
+        return 'query_regene'
+    else:
+        return 'stopper'
+
+
+def stopper(state: AgentState) -> dict:
+    return {'final_resp': 'Cannot find suitable content for the article creation!!!'}
+
+
+def query_regenerator(state: AgentState) -> dict:
+    count = state['regen_count']
+    # logs=list(state['logs'])
+    # logs.append("Query Re-generator Agent Initialised... \n")
+    # create relevant queries for search from the user input topic
+    prompt = f'''You are a helpful assistant to create atmost three different queries for searching in web to get most relevant
+  information on the topic given by the user.
+  ----------------------------
+  User topic: {state['user_topic']}
+  ---------------------------
+  Previously generated queries were: {state["query_list"]} \n
+  These queries couldnt fetch required relevant information from the web. So create another set of queries for the topic.
+
+  Give the response in the given json format and donot add any additional data like markdown formatting syntax block wrappers, explanations, or intro text
+  ------------------------
+  [{{"query":"query for search"}},
+  {{"query":"query for search"}}]
+
+  '''
+    # logs.append(f"🧠 [Node: AI LLM response]: '{prompt}'... \n")
+    response = llm.invoke(prompt)
+    formated_response = {}
+    try:
+        clean_content = response.content.strip().replace("```json", "").replace("```", "").strip()
+        formated_response = json.loads(clean_content)
+        count += 1
+        # logs.append("Query generation completed..")
+    except Exception as e:
+        count += 1
+        # logs.append(f"⚠️ Model extraction or link lookup exception: {str(e)} \n")
+
+    return {'query_list': formated_response, 'regen_count': count}
+
+
+def content_creator(state: AgentState) -> dict:
+    new_logs = []  # Changed
+    new_logs.append("Content creator Agent Initialised... \n")  # Changed
+    prompt = f'''
+  You are a helpful assistant creates a good understandable and well structured article creator for the topic {state['user_topic']}
+   using ONLY the given content:\n
+  -----------\n
+  Content: \n
+  {state['raw_info']} \n
+  \n
+  Return the content as Markdown format so that the reader can understand it.
+  '''
+    response = llm.invoke(prompt)
+
+    final_content = ""  # Initialize final_content
+    try:
+        final_content = response.content  # Changed variable name
+        new_logs.append("Content creation completed..")  # Changed
+    except Exception as e:
+        new_logs.append(f"⚠️ Model extraction or link lookup exception: {str(e)} \n")  # Changed
+        final_content = "Error during content creation."  # Fallback content in case of error
+
+    return {'final_resp': final_content, 'logs': new_logs}  # Changed, and used final_content
+
+
+def final_response(state: AgentState) -> dict:
+    new_logs = []  # Changed
+    new_logs.append("Final Response Agent Initialised... \n")  # Changed
+    return {'final_resp': state['final_resp'], 'logs': new_logs}  # Changed
+
+@st.cache_resource
+def get_compiled_graph():
+    """Compiles the graph once and caches it across Streamlit reruns."""
+    wf = StateGraph(AgentState)
+    wf.add_node("query_generator", query_generator)
+    wf.add_node('web_searcher', searcher)
+    wf.add_node('evaluator', data_evaluator)
+    wf.add_node('count_checker_initialise', count_checker_initialise)
+    wf.add_node('query_regen', query_regenerator)
+    wf.add_node('stopper', stopper)
+    wf.add_node('content_creator', content_creator)
+    wf.add_node('completion', final_response)
+    wf.set_entry_point('query_generator')
+    wf.add_edge('query_generator', 'web_searcher')
+    wf.add_edge('query_regen', 'web_searcher')
+    wf.add_edge('web_searcher', 'evaluator')
+    wf.add_conditional_edges(
+        'evaluator',
+        analyse_evaluator,
+        {
+            "success": "content_creator",
+            "requery": "count_checker_initialise"
+        }
+    )
+    wf.add_conditional_edges(
+        'count_checker_initialise',
+        count_check,
+        {
+            "query_regene": "query_regen",
+            "stopper": "stopper"
+        }
+    )
+    wf.add_edge('stopper', 'completion')
+    # wf.add_edge('evaluator','content_creator')
+    wf.add_edge('content_creator', 'completion')
+    wf.add_edge('completion', END)
+
+    memory = MemorySaver()
+    return wf.compile(checkpointer=memory, interrupt_before=["completion"])
+
+app = get_compiled_graph()
+
+# =====================================================================
+# 2. STREAMLIT UI LAYOUT
+# =====================================================================
+
+st.title("📝 AI Multi-Agent Researcher with Human-In-The-Loop")
+
+# Maintain a persistent thread ID for the user session
+if "thread_id" not in st.session_state:
+    st.session_state.thread_id = f"session_{os.urandom(4).hex()}"
+
+config = {"configurable": {"thread_id": st.session_state.thread_id}}
+
+# UI Sidebar for inputs
+with st.sidebar:
+    st.header("Settings")
+    user_topic = st.text_input("Enter Article Topic:", "Quantum Computing Basics")
+    start_btn = st.button("🚀 Start Research Pipeline")
+
+snapshot = app.get_state(config)
+
+# --- CASE 1: Triggering the initial execution track ---
+if start_btn:
+    st.session_state.current_status = "running"
+    inputs = {"user_topic": user_topic, "logs": [], "regen_count": 0}
+
+    st.info("Agents are working... gathering and evaluating data.")
+    with st.spinner("Executing pipeline tasks..."):
+        # Run until it hits the 'completion' node interrupt
+        for event in app.stream(inputs, config):
+            pass
+    st.rerun()
+
+# --- CASE 2: Graph is paused at human review point ---
+if snapshot.next and "completion" in snapshot.next:
+    generated_article = snapshot.values.get("final_resp", "")
+    current_logs = snapshot.values.get("logs", [])
+
+    # Display running logs for transparency
+    with st.expander("👁️ View Agent Activity Logs"):
+        for log in current_logs:
+            st.text(log.strip())
+
+    st.success("🤖 Agents completed the draft! Please review below:")
+
+    # Showcase the article inside a neat UI text window
+    st.markdown("### Preview Draft Article")
+    st.info(generated_article)
+
+    st.markdown("---")
+    st.markdown("### Human Verdict")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("✅ Approve & Publish Article", use_container_width=True):
+            with st.spinner("Finalising output execution..."):
+                for event in app.stream(None, config):
+                    pass
+            st.success("🎉 Process finalized cleanly!")
+            st.rerun()
+
+    with col2:
+        st.markdown("**Reject & Send Back**")
+        # feedback = st.text_area("What should the agents fix or change?",
+        #                         placeholder="e.g., Make it simpler or focus on cryptography aspect.")
+        if st.button("❌ Reject Draft & Re-Query", use_container_width=True, type="primary"):
+            # Force redirect the workflow execution track back into query regeneration node
+            with st.spinner("Redirecting agents back to re-querying loop..."):
+                for event in app.stream(None, config):
+                    pass
+            st.rerun()
+
+# --- CASE 3: Process finished completely ---
+elif not snapshot.next and snapshot.values.get("final_resp"):
+    # st.balloons()
+    st.markdown("## 🏁 Final Article Output")
+    st.markdown(snapshot.values.get("final_resp"))
+
+    if st.button("🔄 Start New Research Topic"):
+        st.session_state.thread_id = f"session_{os.urandom(4).hex()}"
+        st.rerun()
+
