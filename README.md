@@ -50,31 +50,6 @@ An autonomous, multi-agent research assistant built with **LangGraph**, **Groq (
 
 ---
 
-## 🧑‍💻 Technical Deep-Dive
-
-### 1. Atomic State & Persistent Memory
-Standard variables lose state on page reruns in UI engines like Streamlit. This pipeline registers a `MemorySaver` checkpointer attached to a constant tracking context:
-```python
-memory = MemorySaver()
-app = wf.compile(checkpointer=memory, interrupt_before=["completion"])
-```
-
-### 2. Time-Travel via Command Primitive
-When a human rejects an article, simply updating variables isn't enough; the future execution stack must be cleared. We pass the `Command` object to dynamically bypass hardcoded destination pointers:
-```python
-from langgraph.types import Command
-
-app.stream(
-    Command(
-        update={"user_topic": f"{topic} (Notes: {feedback})", "regen_count": count + 1},
-        goto="query_regen"
-    ),
-    config
-)
-```
-
----
-
 ## 💾 Installation & Setup
 
 1. **Clone the repository:**
