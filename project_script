@@ -1,0 +1,269 @@
+import os
+import json
+from langchain_groq import ChatGroq
+from langchain_community.tools import DuckDuckGoSearchRun
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
+from typing import TypedDict, List
+from typing_extensions import Annotated # Add this import
+import operator # Add this import
+
+# Secure API Key Entry
+if "GROQ_API_KEY" not in os.environ:
+    os.environ["GROQ_API_KEY"] = "API KEY"
+
+#LLM model initialisation
+llm=ChatGroq(model="llama-3.3-70b-versatile",temperature=0)
+
+## DuckDuckGo initialisation
+web_search_tool = DuckDuckGoSearchRun()
+
+class AgentState(TypedDict):
+  user_topic: str
+  query_list:List[str]
+  raw_info: List[str]
+  evaluator_resp: dict
+  final_resp: dict
+  logs: Annotated[List[str], operator.add] # Changed this line
+  regen_count: int
+
+
+def query_generator(state: AgentState)-> dict:
+  new_logs = [] # Changed
+  new_logs.append("Query generator Agent Initialised... \n") # Changed from logs.append
+  prompt=f'''You are a helpful assistant to create atmost three different queries for searching in web to get most relevant
+  information on the topic given by the user.
+  ----------------------------
+  User topic: {state['user_topic']}
+  ---------------------------
+  Give the response in the given json format and donot add any additional data like markdown formatting syntax block wrappers, explanations, or intro text
+  ------------------------
+  [{{"query":"query for search"}},
+  {{"query":"query for search"}}]
+
+  '''
+  # new_logs.append(f"🧠 [Node: AI LLM response]: '{prompt}'... \n")
+  response = llm.invoke(prompt)
+  formated_response={}
+  try:
+      clean_content = response.content.strip().replace("```json", "").replace("```", "").strip()
+      formated_response = json.loads(clean_content)
+      new_logs.append("Query generation completed..") # Changed from logs.append
+  except Exception as e:
+      new_logs.append(f"⚠️ Model extraction or link lookup exception: {str(e)} \n") # Changed from logs.append
+
+  return {'query_list':formated_response,'logs':new_logs} # Changed to new_logs
+
+def searcher(state:AgentState)-> dict:
+  new_logs = [] # Changed
+  new_logs.append("Searcher Agent Initialised... \n") # Changed
+  response=[]
+  for query in state['query_list']:
+    new_logs.append(f"🌐 [Node: Web Search] Querying DuckDuckGo: '{query['query']}'...") # Changed (fixed query['query'])
+    # Execute the live web search tool
+    search_results_text = web_search_tool.invoke(query['query'])
+    response.append(search_results_text)
+  # new_logs.append(f"🌐 [Node: {response}")
+  return {'raw_info':response,'logs':new_logs} # Changed
+
+def data_evaluator(state:AgentState)-> dict:
+  new_logs = [] # Changed
+  new_logs.append("Data Evaluator Agent Initialised... \n") # Changed
+  prompt=f'''
+  You are a helpful assistant who help to evaluate the content retrieved from web for the topic {state['user_topic']} as:
+  1. Relevant to the topic
+  2. Not an outlier
+  3. If all aspects are covered so as to write an article on the topic.
+
+  The data obtained from the web is given below:
+  {state['raw_info']} \n
+  \n
+  If you feels the contents are enough for creating a well structured article, just return a json response as given below
+   {{"Relevance":"Yes"}} other wise return {{ "Relevance":"No"}}. \n
+   Do not add any additional text, explanation or evaluations, Just return the json.
+  '''
+  response=llm.invoke(prompt)
+
+  cleaned_response={}
+  try:
+      clean_content = response.content.strip().replace("```json", "").replace("```", "").strip()
+      cleaned_response = json.loads(clean_content)
+      new_logs.append("Evaluation completed..") # Changed
+  except Exception as e:
+      new_logs.append(f"⚠️ Model extraction or link lookup exception: {str(e)} \n") # Changed
+
+  return {'evaluator_resp':cleaned_response,'logs':new_logs} # Changed
+
+def analyse_evaluator(state:AgentState)-> str:
+  # logs=list(state['logs'])
+  # logs.append("Evaluator response checking Agent Initialised... \n")
+  eval_resp=state['evaluator_resp']
+  if eval_resp['Relevance']=='Yes':
+    return "success"
+  else:
+    return "requery"
+
+def count_checker_initialise(state:AgentState)-> dict:
+  new_logs = [] # Changed
+  new_logs.append("Count Checker initialiser Agent started... \n") # Changed
+  return {'logs':new_logs} # Changed
+
+def count_check(state:AgentState)-> dict:
+  if state['regen_count']<2:
+    return 'query_regene'
+  else:
+    return 'stopper'
+
+def stopper(state:AgentState)-> dict:
+  return {'final_resp':'Cannot find suitable content for the article creation!!!'}
+
+def query_regenerator(state: AgentState)-> dict:
+  count=state['regen_count']
+  # logs=list(state['logs'])
+  # logs.append("Query Re-generator Agent Initialised... \n")
+  # create relevant queries for search from the user input topic
+  prompt=f'''You are a helpful assistant to create atmost three different queries for searching in web to get most relevant
+  information on the topic given by the user.
+  ----------------------------
+  User topic: {state['user_topic']}
+  ---------------------------
+  Previously generated queries were: {state["query_list"]} \n
+  These queries couldnt fetch required relevant information from the web. So create another set of queries for the topic.
+
+  Give the response in the given json format and donot add any additional data like markdown formatting syntax block wrappers, explanations, or intro text
+  ------------------------
+  [{{"query":"query for search"}},
+  {{"query":"query for search"}}]
+
+  '''
+  # logs.append(f"🧠 [Node: AI LLM response]: '{prompt}'... \n")
+  response = llm.invoke(prompt)
+  formated_response={}
+  try:
+      clean_content = response.content.strip().replace("```json", "").replace("```", "").strip()
+      formated_response = json.loads(clean_content)
+      count+=1
+      # logs.append("Query generation completed..")
+  except Exception as e:
+      count+=1
+      # logs.append(f"⚠️ Model extraction or link lookup exception: {str(e)} \n")
+
+  return {'query_list':formated_response,'regen_count':count}
+
+def content_creator(state:AgentState)-> dict:
+  new_logs = [] # Changed
+  new_logs.append("Content creator Agent Initialised... \n") # Changed
+  prompt=f'''
+  You are a helpful assistant creates a good understandable and well structured article creator for the topic {state['user_topic']}
+   using ONLY the given content:\n
+  -----------\n
+  Content: \n
+  {state['raw_info']} \n
+  \n
+  Return the content as Markdown format so that the reader can understand it.
+  '''
+  response=llm.invoke(prompt)
+
+  final_content = "" # Initialize final_content
+  try:
+      final_content = response.content # Changed variable name
+      new_logs.append("Content creation completed..") # Changed
+  except Exception as e:
+      new_logs.append(f"⚠️ Model extraction or link lookup exception: {str(e)} \n") # Changed
+      final_content = "Error during content creation." # Fallback content in case of error
+
+  return {'final_resp':final_content,'logs':new_logs} # Changed, and used final_content
+
+def final_response(state: AgentState)-> dict:
+  new_logs = [] # Changed
+  new_logs.append("Final Response Agent Initialised... \n") # Changed
+  return {'final_resp':state['final_resp'],'logs':new_logs} # Changed
+
+wf=StateGraph(AgentState)
+wf.add_node("query_generator",query_generator)
+wf.add_node('web_searcher',searcher)
+wf.add_node('evaluator',data_evaluator)
+wf.add_node('count_checker_initialise',count_checker_initialise)
+wf.add_node('query_regen',query_regenerator)
+wf.add_node('stopper',stopper)
+wf.add_node('content_creator',content_creator)
+wf.add_node('completion',final_response)
+wf.set_entry_point('query_generator')
+wf.add_edge('query_generator','web_searcher')
+wf.add_edge('query_regen','web_searcher')
+wf.add_edge('web_searcher','evaluator')
+wf.add_conditional_edges(
+    'evaluator',
+    analyse_evaluator,
+    {
+        "success":"content_creator",
+        "requery":"count_checker_initialise"
+    }
+ )
+wf.add_conditional_edges(
+    'count_checker_initialise',
+    count_check,
+    {
+        "query_regene":"query_regen",
+        "stopper":"stopper"
+    }
+ )
+wf.add_edge('stopper','completion')
+# wf.add_edge('evaluator','content_creator')
+wf.add_edge('content_creator','completion')
+wf.add_edge('completion',END)
+memory = MemorySaver()
+app = wf.compile(
+    checkpointer=memory,
+    interrupt_before=["completion"]  # 🚦 Pause right before showing final results
+)
+
+if __name__=="__main__":
+  user_topic=input('''Enter the topic: \t''')
+  config = {"configurable": {"thread_id": "article_review_session"}}
+  inputs={'user_topic':user_topic,'logs':[], 'regen_count':0}
+  # --- STEP 1: Run graph up to the review point ---
+  print("🚀 Running graph to generate the article...")
+  for event in app.stream(inputs, config):
+      pass # Runs silently until it hits the interrupt
+
+  while True:
+    snapshot = app.get_state(config)
+    
+    # Verify if the graph is paused at 'completion'
+    if "completion" in snapshot.next:
+        generated_article = snapshot.values.get("final_resp")
+        
+        print("\n=================== 📝 GENERATED ARTICLE FOR REVIEW ===================")
+        print(generated_article)
+        print("=======================================================================")
+        
+        # Ask the user for feedback
+        feedback = input("\nIs this article up to mark? (yes/no): ").strip().lower()
+        
+        if feedback == 'yes':
+            print("\n✅ Article approved! Finalising graph...")
+            # Pass None to resume and hit END
+            for event in app.stream(None, config):
+                print('SUCESS')
+            break
+            
+        else:
+            print("\n❌ Article rejected. Sending back for query regeneration...")
+            
+            # Crucial Step: Fork the graph execution path back to 'query_regen' node
+            print("🔄 Redirecting graph route...")
+            for event in app.stream(None, config, destination="query_regen"):
+                print('REGEN')
+                
+    else:
+        # If it's not paused at completion, it means it hit the 'stopper' or finished completely
+        final_state = app.get_state(config)
+        print("\n🏁 Process Finished. Output:\n", final_state.values.get("final_resp"))
+        break
+
+  # print("\n" + "="*40 + "\n🤖 AGENT EXECUTION TRACE LOGS\n" + "="*40)
+  # for log in output["logs"]:
+  #     print(log)
+  # print("\n" + "="*40 + "\n🤖FINAL CONTENT\n" + "="*40)
+  # print(output['final_resp'])
